@@ -1,6 +1,6 @@
+# src/dao/customer_dao.py
 from typing import Optional, List, Dict
 from src.config import get_supabase
-
 
 class CustomerDAO:
     """Data Access Object for customers table."""
@@ -9,7 +9,6 @@ class CustomerDAO:
         self._sb = get_supabase()
 
     def create_customer(self, name: str, email: str, phone: str, city: Optional[str] = None) -> Optional[Dict]:
-        # Check for unique email
         if self.get_customer_by_email(email):
             raise ValueError(f"Email already exists: {email}")
 
@@ -17,8 +16,7 @@ class CustomerDAO:
         if city:
             payload["city"] = city
 
-        self._sb.table("customers").insert(payload).execute()
-        resp = self._sb.table("customers").select("*").eq("email", email).limit(1).execute()
+        resp = self._sb.table("customers").insert(payload).execute()
         return resp.data[0] if resp.data else None
 
     def get_customer_by_id(self, cust_id: int) -> Optional[Dict]:
@@ -30,19 +28,18 @@ class CustomerDAO:
         return resp.data[0] if resp.data else None
 
     def update_customer(self, cust_id: int, fields: Dict) -> Optional[Dict]:
-        self._sb.table("customers").update(fields).eq("cust_id", cust_id).execute()
-        resp = self._sb.table("customers").select("*").eq("cust_id", cust_id).limit(1).execute()
+        resp = self._sb.table("customers").update(fields).eq("cust_id", cust_id).execute()
         return resp.data[0] if resp.data else None
 
     def delete_customer(self, cust_id: int) -> Optional[Dict]:
-        # Check if customer has orders
-        resp_orders = self._sb.table("orders").select("*").eq("cust_id", cust_id).limit(1).execute()
+        resp_orders = self._sb.table("orders").select("order_id").eq("cust_id", cust_id).limit(1).execute()
         if resp_orders.data:
-            raise ValueError("Cannot delete customer: orders exist")
+            raise ValueError("Cannot delete customer: orders exist for this customer.")
 
         resp_before = self._sb.table("customers").select("*").eq("cust_id", cust_id).limit(1).execute()
         row = resp_before.data[0] if resp_before.data else None
-        self._sb.table("customers").delete().eq("cust_id", cust_id).execute()
+        if row:
+            self._sb.table("customers").delete().eq("cust_id", cust_id).execute()
         return row
 
     def list_customers(self, limit: int = 100) -> List[Dict]:

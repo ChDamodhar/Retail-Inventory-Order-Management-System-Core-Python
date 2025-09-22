@@ -1,37 +1,40 @@
+# src/services/payment_service.py
 from datetime import datetime
 from src.dao.payment_dao import PaymentDAO
 from src.dao.order_dao import OrderDAO
 
+class PaymentError(Exception):
+    pass
 
 class PaymentService:
     def __init__(self):
         self.payment_dao = PaymentDAO()
         self.order_dao = OrderDAO()
 
-    def _convert_datetime(self, obj):
-        """Recursively convert datetime objects in dicts/lists to ISO strings."""
-        from datetime import datetime
-        if isinstance(obj, dict):
-            return {k: self._convert_datetime(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [self._convert_datetime(v) for v in obj]
-        elif isinstance(obj, datetime):
-            return obj.isoformat()
-        else:
-            return obj
-
     def create_payment(self, order_id: int, amount: float):
-        """Insert pending payment when order is created."""
-        payment = self.payment_dao.create_payment(order_id, amount)
-        return self._convert_datetime(payment)
+        """Insert a pending payment record when an order is created."""
+        return self.payment_dao.create_payment(order_id, amount)
 
     def process_payment(self, order_id: int, method: str):
-        """Mark payment as PAID and update order to COMPLETED."""
+        """Mark payment as PAID and update order status."""
+        order = self.order_dao.get_order_details(order_id)
+        if not order:
+            raise PaymentError(f"Order with ID {order_id} not found.")
+        
+        if order['status'] != 'PLACED':
+             raise PaymentError(f"Cannot process payment for an order with status '{order['status']}'.")
+
         payment = self.payment_dao.update_payment(order_id, "PAID", method, datetime.utcnow())
         self.order_dao.update_order_status(order_id, "COMPLETED")
-        return self._convert_datetime(payment)
+        return payment
 
     def refund_payment(self, order_id: int):
-        """Mark payment as REFUNDED if order cancelled."""
-        payment = self.payment_dao.update_payment(order_id, "REFUNDED")
-        return self._convert_datetime(payment)
+        """Mark payment as REFUNDED."""
+        payment = self.payment_dao.get_payment(order_id)
+        if not payment:
+            raise PaymentError(f"No payment record found for order ID {order_id}.")
+        
+        if payment['status'] != 'PAID':
+            raise PaymentError(f"Cannot refund a payment that is not 'PAID'. Current status: '{payment['status']}'")
+
+        return self.payment_dao.update_payment(order_id, "REFUNDED")

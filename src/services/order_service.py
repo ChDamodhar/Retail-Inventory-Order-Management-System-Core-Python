@@ -1,89 +1,85 @@
+# src/services/order_service.py
 from typing import List, Dict
 from src.dao.order_dao import OrderDAO
-from src.dao.customer_dao import CustomerDAO
 from src.dao.product_dao import ProductDAO
-from src.services.payment_service import PaymentService
-
+from src.dao.customer_dao import CustomerDAO
+from src.services.payment_service import PaymentService, PaymentError
 
 class OrderError(Exception):
     pass
 
-
 class OrderService:
-    """Service for creating and managing orders."""
-
     def __init__(self):
         self.order_dao = OrderDAO()
-        self.customer_dao = CustomerDAO()
         self.product_dao = ProductDAO()
-        self.payment_service = PaymentService()  # Inject PaymentService here
+        self.customer_dao = CustomerDAO()
+        self.payment_service = PaymentService()
 
-    def create_order(self, cust_id: int, items: List[Dict]) -> Dict:
-        # 1️⃣ Check customer exists
-        customer = self.customer_dao.get_customer_by_id(cust_id)
-        if not customer:
-            raise OrderError(f"Customer {cust_id} does not exist")
+    def create_order(self, cust_id: int, items_to_order: List[Dict]) -> Dict:
+        if not self.customer_dao.get_customer_by_id(cust_id):
+            raise OrderError(f"Customer with ID {cust_id} not found.")
+        if not items_to_order:
+            raise OrderError("Cannot create an order with no items.")
 
-        # 2️⃣ Check stock & calculate total
-        total_amount = 0
-        for item in items:
-            prod = self.product_dao.get_product_by_id(item["prod_id"])
-            if not prod:
-                raise OrderError(f"Product {item['prod_id']} does not exist")
-            if prod.get("stock", 0) < item["quantity"]:
-                raise OrderError(
-                    f"Insufficient stock for {prod['name']} (Available: {prod['stock']})"
-                )
-            total_amount += prod["price"] * item["quantity"]
+        total_amount = 0.0
+        items_with_price = []
+        products_to_update = []
 
-        # 3️⃣ Deduct stock
-        for item in items:
-            prod = self.product_dao.get_product_by_id(item["prod_id"])
-            new_stock = prod["stock"] - item["quantity"]
-            self.product_dao.update_product(item["prod_id"], {"stock": new_stock})
+        for item in items_to_order:
+            prod_id, quantity = item["prod_id"], item["quantity"]
+            product = self.product_dao.get_product_by_id(prod_id)
+            if not product:
+                raise OrderError(f"Product with ID {prod_id} not found.")
+            if product["stock"] < quantity:
+                raise OrderError(f"Not enough stock for '{product['name']}'. Available: {product['stock']}, Requested: {quantity}")
+            
+            total_amount += float(product["price"]) * quantity
+            items_with_price.append({**item, "price": product["price"]})
+            products_to_update.append({"id": prod_id, "new_stock": product["stock"] - quantity})
 
-        # 4️⃣ Create order
-        order = self.order_dao.create_order(cust_id, items, total_amount)
+        order = self.order_dao.create_order(cust_id, items_with_price, total_amount)
+        if not order:
+            raise OrderError("Failed to create the order in the database.")
 
-        # 5️⃣ Create pending payment for this order
-        self.payment_service.create_payment(order["order_id"], total_amount)
+        for p_update in products_to_update:
+            self.product_dao.update_product(p_update["id"], {"stock": p_update["new_stock"]})
+            
+        self.payment_service.create_payment(order['order_id'], total_amount)
 
-        return order
+        return self.get_order_details(order["order_id"])
 
     def get_order_details(self, order_id: int) -> Dict:
         order = self.order_dao.get_order_details(order_id)
         if not order:
-            raise OrderError(f"Order {order_id} not found")
+            raise OrderError(f"Order with ID {order_id} not found.")
         return order
-
-    def list_orders_by_customer(self, cust_id: int) -> List[Dict]:
-        return self.order_dao.list_orders_by_customer(cust_id)
 
     def cancel_order(self, order_id: int) -> Dict:
         order = self.get_order_details(order_id)
-        if order["status"] != "PLACED":
-            raise OrderError("Only PLACED orders can be cancelled")
+        if order["status"] in ["CANCELLED", "COMPLETED"]:
+            raise OrderError(f"Cannot cancel order {order_id}. Status is '{order['status']}'.")
 
-        # Restore stock
         for item in order["items"]:
-            prod = self.product_dao.get_product_by_id(item["product_id"])
-            new_stock = prod.get("stock", 0) + item["quantity"]
-            self.product_dao.update_product(item["product_id"], {"stock": new_stock})
+            product = item["product"]
+            if product:
+                new_stock = product["stock"] + item["quantity"]
+                self.product_dao.update_product(product["prod_id"], {"stock": new_stock})
+        
+        try:
+            self.payment_service.refund_payment(order_id)
+        except PaymentError as e:
+            # Ignore if payment wasn't processed yet, but log it
+            print(f"Notice: Could not refund payment for order {order_id}. Reason: {e}")
 
-        # Update order status
-        self.order_dao.update_order_status(order_id, "CANCELLED")
-
-        # Refund payment
-        self.payment_service.refund_payment(order_id)
-
-        # Return updated order
-        return self.get_order_details(order_id)
+        return self.order_dao.update_order_status(order_id, "CANCELLED")
 
     def complete_order(self, order_id: int) -> Dict:
         order = self.get_order_details(order_id)
         if order["status"] != "PLACED":
-            raise OrderError("Only PLACED orders can be completed")
-        updated_order = self.order_dao.update_order_status(order_id, "COMPLETED")
-        # Optionally mark payment as PAID if not already
-        self.payment_service.process_payment(order_id, method="UPI")  # Default method
-        return updated_order
+             raise OrderError(f"Only 'PLACED' orders can be completed. Current status: '{order['status']}'.")
+        
+        payment = self.payment_service.payment_dao.get_payment(order_id)
+        if not payment or payment['status'] != 'PAID':
+            raise OrderError(f"Order cannot be completed until payment is processed. Payment status: '{payment['status'] if payment else 'N/A'}'.")
+
+        return self.order_dao.update_order_status(order_id, "COMPLETED")
